@@ -150,11 +150,11 @@ class ClipService : Service() {
      * Two ways to reach the clip, running side by side:
      *  1. A direct "auto connect" to the known address. Android keeps waiting for the clip
      *     and connects as soon as it is in range, without needing a scan (works with screen off).
-     *  2. A scan for the clip's address (both public and random address types). When the scan
-     *     sees the clip first, we switch to a fast direct connection.
+     *  2. A scan that looks for the clip's address. When the scan sees the clip first,
+     *     we switch to a fast direct connection.
      * The clip's address starts with C0, which is a "random static" Bluetooth address; on
-     * Android 13+ a plain address filter only matches public addresses, which is why the
-     * first version kept searching forever.
+     * Android 13+ a plain address scan filter only matches public addresses, which is why
+     * the first version kept searching forever.
      */
     private fun startScan() {
         val a = adapter()
@@ -163,14 +163,10 @@ class ClipService : Service() {
         if (gatt == null) autoConnect(a)
         if (scanning) return
         val scanner = a.bluetoothLeScanner ?: return
-        val mac = Prefs.mac(this)
-        val filters = mutableListOf<ScanFilter>()
-        if (Build.VERSION.SDK_INT >= 33) {
-            filters += ScanFilter.Builder().setDeviceAddress(mac, BluetoothDevice.ADDRESS_TYPE_RANDOM).build()
-            filters += ScanFilter.Builder().setDeviceAddress(mac, BluetoothDevice.ADDRESS_TYPE_PUBLIC).build()
-        } else {
-            filters += ScanFilter.Builder().setDeviceAddress(mac).build()
-        }
+        // No address filter: on Android 13+ the public filter only matches public addresses,
+        // and the clip uses a random one. We check the address ourselves in the callback.
+        // (With the screen off Android pauses unfiltered scans; the auto-connect covers that.)
+        val filters = emptyList<ScanFilter>()
         val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         try {
             scanner.startScan(filters, settings, scanCallback)
@@ -206,6 +202,7 @@ class ClipService : Service() {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (!result.device.address.equals(Prefs.mac(this@ClipService), ignoreCase = true)) return
             handler.post { connect(result.device) }
         }
 

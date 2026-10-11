@@ -368,6 +368,13 @@ class ClipService : Service() {
             ops.addLast { enableNotify(g, batt) }
             ops.addLast { if (!g.readCharacteristic(batt)) handler.post { nextOp() } }
         }
+        // Once set up, ask for the slowest connection (about 100-125 ms interval instead of ~30-50 ms).
+        // The clip's radio then wakes up far less often, which saves its coin cell. Losing the clip is
+        // still detected within seconds, which is plenty for an alarm that waits minutes anyway.
+        ops.addLast {
+            try { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_LOW_POWER) } catch (_: Exception) {}
+            handler.post { nextOp() }
+        }
         nextOp()
     }
 

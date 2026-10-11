@@ -11,8 +11,8 @@ android {
         applicationId = "com.edmond.clipguard"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 8
+        versionName = "1.7"
     }
 
     buildTypes {

@@ -146,22 +146,56 @@ class ClipService : Service() {
     private fun adapter(): BluetoothAdapter? =
         getSystemService(BluetoothManager::class.java)?.adapter
 
+    /**
+     * Two ways to reach the clip, running side by side:
+     *  1. A direct "auto connect" to the known address. Android keeps waiting for the clip
+     *     and connects as soon as it is in range, without needing a scan (works with screen off).
+     *  2. A scan for the clip's address (both public and random address types). When the scan
+     *     sees the clip first, we switch to a fast direct connection.
+     * The clip's address starts with C0, which is a "random static" Bluetooth address; on
+     * Android 13+ a plain address filter only matches public addresses, which is why the
+     * first version kept searching forever.
+     */
     private fun startScan() {
-        if (scanning || gatt != null) return
         val a = adapter()
         if (a == null || !a.isEnabled) { lastEvent = "Bluetooth is off"; update(); return }
+        if (connected) return
+        if (gatt == null) autoConnect(a)
+        if (scanning) return
         val scanner = a.bluetoothLeScanner ?: return
-        val filter = ScanFilter.Builder().setDeviceAddress(Prefs.mac(this)).build()
-        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_BALANCED).build()
+        val mac = Prefs.mac(this)
+        val filters = mutableListOf<ScanFilter>()
+        if (Build.VERSION.SDK_INT >= 33) {
+            filters += ScanFilter.Builder().setDeviceAddress(mac, BluetoothDevice.ADDRESS_TYPE_RANDOM).build()
+            filters += ScanFilter.Builder().setDeviceAddress(mac, BluetoothDevice.ADDRESS_TYPE_PUBLIC).build()
+        } else {
+            filters += ScanFilter.Builder().setDeviceAddress(mac).build()
+        }
+        val settings = ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build()
         try {
-            scanner.startScan(listOf(filter), settings, scanCallback)
+            scanner.startScan(filters, settings, scanCallback)
             scanning = true
-            lastEvent = "Searching for clip…"
+            if (!connected) lastEvent = "Searching for clip… (close the clip and keep it nearby)"
         } catch (e: Exception) {
             lastEvent = "Scan failed: ${e.message}"
-            handler.postDelayed({ startScan() }, 15_000)
         }
         update()
+    }
+
+    private fun remoteDevice(a: BluetoothAdapter): BluetoothDevice {
+        val mac = Prefs.mac(this)
+        return if (Build.VERSION.SDK_INT >= 33)
+            a.getRemoteLeDevice(mac, BluetoothDevice.ADDRESS_TYPE_RANDOM)
+        else a.getRemoteDevice(mac)
+    }
+
+    private fun autoConnect(a: BluetoothAdapter) {
+        try {
+            fastConnecting = false
+            gatt = remoteDevice(a).connectGatt(this, true, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: Exception) {
+            lastEvent = "Connect failed: ${e.message}"
+        }
     }
 
     private fun stopScan() {
@@ -185,20 +219,26 @@ class ClipService : Service() {
         }
     }
 
+    private var fastConnecting = false
+
     private val connectTimeout = Runnable {
         if (!connected) {
             lastEvent = "Connect timeout, retrying"
             gatt?.close()
             gatt = null
+            fastConnecting = false
             startScan()
         }
     }
 
+    /** Scan saw the clip: replace the slow waiting connection with a fast direct one. */
     private fun connect(device: BluetoothDevice) {
-        if (gatt != null) return
+        if (connected || fastConnecting) return
         stopScan()
+        gatt?.close()
+        fastConnecting = true
         gatt = device.connectGatt(this, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-        lastEvent = "Connecting…"
+        lastEvent = "Clip found, connecting…"
         handler.postDelayed(connectTimeout, 20_000)
         update()
     }
@@ -247,6 +287,8 @@ class ClipService : Service() {
 
     private fun onConnected(g: BluetoothGatt) {
         handler.removeCallbacks(connectTimeout)
+        stopScan()
+        fastConnecting = false
         connected = true
         lastEvent = "Connected to clip"
         if (stage > 0) {
@@ -268,6 +310,7 @@ class ClipService : Service() {
         connected = false
         g.close()
         gatt = null
+        fastConnecting = false
         ops.clear()
         lastEvent = "Lost connection to clip"
         if (wasConnected && clipClosed == true && !dismissed && stage == 0) startWarning()
@@ -473,6 +516,7 @@ class ClipService : Service() {
             if (state == BluetoothAdapter.STATE_ON) handler.postDelayed({ startScan() }, 1_000)
             if (state == BluetoothAdapter.STATE_OFF) {
                 scanning = false
+                if (!connected) { gatt?.close(); gatt = null; fastConnecting = false }
                 gatt?.let { onDisconnected(it) }
             }
         }
